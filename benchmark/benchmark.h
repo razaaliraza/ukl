@@ -16,8 +16,20 @@ int get_rank();
 int get_succ();
 int get_pred();
 
-/* Initialize args */
+/* Initialize args and communication */
 void init(int argc, char **argv);
+
+/* Initialize TCP connections */
+void TCP_Init();
+
+/* Accept TCP connection */
+void TCP_Accept(int source);
+
+/* Connect to TCP socket */
+void TCP_Connect(int dest);
+
+/* Finalize TCP Connections */
+int TCP_Finalize();
 
 /* Parse the arguments */
 static int parse_opts(int argc, char **argv)

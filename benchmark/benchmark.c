@@ -1,12 +1,47 @@
 #include <liburing.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <getopt.h>
+#include <unistd.h>
+#include <math.h>
+#include "benchmark.h"
 
-#define COLS 1
+#define COLS 				1
+#define NUM_PARTIES 		3
+#define DEFAULT_PORT 		8000
+
+#define QUEUE				10
+#define EVENT_TYPE_READ		1
+#define EVENT_TYPE_WRITE	2
+
+#define MAX_CONN_TRIES 		8
+
+struct io_uring ring;
+
+struct request {
+	int event_type;
+	int iovec_count;
+	int socket;
+	struct iovec iov[];
+};
+
+struct secrecy_config {
+	unsigned int rank;
+	unsigned int num_parties;
+	int initialized;
+	unsigned short port;
+	char **ip_list;
+} config;
+
+const static char *opt_str = "r:c:p:i:h";
+
+int succ_sock;
+int pred_sock;
 
 int main(int argc, char **argv)
 {
@@ -19,7 +54,19 @@ int main(int argc, char **argv)
 	const int pred = get_pred();
 	const int succ = get_succ();
 
-	
+	int len = strlen("Hello");
+	char *recv_buf = calloc(len, sizeof(char));
+	if(rank == 0)
+	{
+		char *str = (char *)"Hello";
+		TCP_Send(get_socket(succ), (void *)str, len);
+		TCP_Send(get_socket(pred), (void *)str, len);
+	}
+	else
+	{
+		TCP_Recv(get_socket(0), (void *)recv_buf, len);
+		printf("Node %i recieved: %s\n", rank, recv_buf);
+	}
 }
 
 // initialize communication, config.rank, num_parties
@@ -36,8 +83,88 @@ void init(int argc, char **argv)
 	if (config.rank == 0 && config.num_parties != NUM_PARTIES)
 	{
 		fprintf(stderr, "ERROR: The number of processes must be %d for %s\n", NUM_PARTIES, argv[0]);
-	}                                                        }
+	}
 }
+
+int get_socket(unsigned int rank)
+{
+	if (rank == get_succ())
+	{
+		return succ_sock;
+	}
+	return pred_sock;
+}
+
+void TCP_Send(int sock, void *data, int len)
+{
+	struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+	struct io_uring_cqe *cqe;
+	struct request *req = malloc(sizeof(struct request) + sizeof(struct iovec));
+
+	req->event_type = EVENT_TYPE_WRITE;
+	req->socket = sock;
+	req->iovec_count = 1;
+	req->iov[0].iov_base = malloc(len);
+	req->iov[0].iov_len = len;
+	memcpy(req->iov[0].iov_base, data, len);
+
+	io_uring_prep_writev(sqe, req->socket, req->iov, req->iovec_count, 0);
+	io_uring_sqe_set_data(sqe, req);
+	io_uring_submit(&ring);
+
+	io_uring_wait_cqe(&ring, &cqe);
+	io_uring_cqe_seen(&ring, cqe);
+}
+
+void TCP_Recv(int sock, void* buf, int len)
+{
+	struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+	struct io_uring_cqe *cqe;
+	struct request *req = malloc(sizeof(struct request) + sizeof(struct iovec));
+	struct request *res;
+
+	req->iovec_count = 1;
+	req->iov[0].iov_base = malloc(len);
+	req->iov[0].iov_len = len;
+	req->event_type = EVENT_TYPE_READ;
+	req->socket = sock;
+	memset(req->iov[0].iov_base, 0, len);
+
+	io_uring_prep_readv(sqe, req->socket, &req->iov[0], req->iovec_count, 0);
+	io_uring_sqe_set_data(sqe, req);
+	io_uring_submit(&ring);
+
+	cqe = malloc(sizeof(struct io_uring_cqe) + sizeof(struct iovec));
+
+	if(io_uring_wait_cqe(&ring, &cqe) != 0)
+	{
+		perror("Recieve completion failed.\n");
+		exit(0);
+	}
+
+	if (cqe->res < 0) 
+	{
+		fprintf(stderr, "Async request failed: %s for event: %d\n",
+		strerror(-cqe->res), req->event_type);
+		exit(1);
+	}
+
+	res = (struct request *)io_uring_cqe_get_data(cqe);
+	memcpy(buf, (char *)res->iov[0].iov_base, len);
+
+	io_uring_cqe_seen(&ring, cqe);
+}
+
+static void print_usage(const char *name)
+{
+	printf("Usage: %s <opts>\n", name);
+	printf("<opts>:\n");
+	printf("    -r|--rank     The rank of this node (from 0 to parties - 1)\n");
+	printf("    -c|--count    The count of parties participating\n");
+	printf("    -p|--port     The to use for internode communication, defaults to 8000\n");
+	printf("    -i|--ips      Comma delimited list of ip addresses in rank order\n");
+	printf("    -h|--help     Print this message\n");
+};
 
 static int parse_opts(int argc, char **argv)
 {
@@ -73,7 +200,7 @@ static int parse_opts(int argc, char **argv)
 					return -1;
 				}
 				haystack = optarg;
-				;
+				break;
 			case 'h':
 			case '?':
 				print_usage(argv[0]);
@@ -135,6 +262,8 @@ void TCP_Init()
 		TCP_Accept(get_pred());
 		TCP_Connect(get_succ());
 	}
+
+	io_uring_queue_init(QUEUE, &ring, IORING_SETUP_SQPOLL);
 }
 
 void TCP_Accept(int source)
@@ -187,10 +316,9 @@ void TCP_Accept(int source)
 	}
 
 	pred_sock = new_socket;
-	return 0;
 }
 
-void TCP_Connect(int dest_
+int TCP_Connect(int dest)
 {
 	int sock = 0, option = 1;
 	struct sockaddr_in serv_addr;
@@ -205,7 +333,7 @@ void TCP_Connect(int dest_
 	serv_addr.sin_family = AF_INET;
 	serv_addr.sin_port = htons(config.port);
 
-	Convert IPv4 and IPv6 addresses from text to binary form
+	// Convert IPv4 and IPv6 addresses from text to binary form
 	if (inet_pton(AF_INET, get_address(dest), &serv_addr.sin_addr) <= 0)
 	{
 		printf("\nInvalid address/ Address not supported \n");
@@ -242,42 +370,33 @@ void TCP_Connect(int dest_
 
 int TCP_Finalize()
 {
-#ifdef TRACE_TCP
-	int i;
-	struct timespec diff;
-	FILE *snds = fopen("/sends.csv", "w");
-	FILE *recvs = fopen("/receives.csv", "w");
-
-	printf("Saw %ld sends and %ld receives\n", send_count, receive_count);
-
-	fprintf(snds, "Time,Size\n");
-	fprintf(recvs, "Time,Size\n");
-	for (i = 0; i < send_count; i++)
-	{
-		calc_diff(&diff, &sends[i].end, &sends[i].start);
-		fprintf(snds, "%ld.%09ld,%ld\n", diff.tv_sec, diff.tv_nsec, sends[i].size);
-	}
-	for (i = 0; i < receive_count; i++)
-	{
-		calc_diff(&diff, &receives[i].end, &receives[i].start);
-		fprintf(recvs, "%ld.%09ld,%ld\n", diff.tv_sec, diff.tv_nsec, receives[i].size);
-	}
-
-#ifdef URING_TCP
-	io_uring_queue_exit(ring)
-#endif
-	fflush(snds);
-	fflush(recvs);
-
-	free(sends);
-	free(receives);
-
-	fclose(snds);
-	fclose(recvs);
-#endif
-
+	io_uring_queue_exit(&ring);
+	
 	close(succ_sock);
 	close(pred_sock);
+}
+
+/* get the IP address of given rank */
+char *get_address(unsigned int rank)
+{
+	if (rank < config.num_parties)
+	{
+		return config.ip_list[rank];
+	}
+	else
+	{
+		printf("No such rank!");
+		return NULL;
+	}
+	return NULL;
+}
+
+static void check_init(const char *f)
+{
+	if (!config.initialized)
+	{
+		fprintf(stderr, "ERROR: init() must be called before %s\n", f);
+	}
 }
 
 int get_rank()

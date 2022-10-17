@@ -48,7 +48,7 @@ libz.a: stamp-zlib-dir
 	-cd zlib && $(MAKE) clean
 	cd zlib && \
 	CFLAGS="$(AM_CFLAGS)" ./configure --static
-	$(MAKE) -C zlib
+	CFLAGS="$(AM_CFLAGS)" $(MAKE) libz.a -C zlib
 	mv zlib/libz.a $@
 
 # Check out a local copy of zlib.
@@ -65,11 +65,10 @@ stamp-zlib-dir:
 UKL.a: stamp-fio-dir undefined_sys_hack.o math_hack.o libz.a
 	rm -f $@
 	$(MAKE) clean -C fio
-	cd fio && ./configure --build-static --extra-cflags="$(AM_CFLAGS)" --disable-libnfs \
-		--disable-tcmalloc
+	cd fio && ./configure --disable-libnfs --disable-tcmalloc
 # XXX We expect this to fail with undefined references to
 # set_bypass_limit / set_bypass_syscall (provided by UKL).
-	-$(MAKE) V=1 -C fio
+	- CFLAGS="$(AM_CFLAGS)" $(MAKE) V=1 -C fio
 	cd fio && ld -r -o ../fio.o --allow-multiple-definition \
 	    $(CRT_STARTS) \
 	    filehash.o rate-submit.o steadystate.o filesetup.o \

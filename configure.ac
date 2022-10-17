@@ -118,5 +118,6 @@ AC_CONFIG_FILES([Makefile \
                  hello/Makefile \
                  memcached/Makefile \
 		 mpc-bench/Makefile \
+		 fio/Makefile \
                  redis/Makefile])
 AC_OUTPUT
